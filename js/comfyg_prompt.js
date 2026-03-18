@@ -23,7 +23,7 @@ function syncDataWidget(node) {
 }
 
 function isPromptWidget(widget) {
-    return !!(widget?._comfygPromptWidget || widget?.name?.startsWith("_vp_"));
+    return !!widget?._comfygPromptWidget;
 }
 
 function isPromptRemoveButton(widget) {
@@ -59,26 +59,6 @@ function relabelPromptWidgets(node) {
     node._promptWidgets = entries.map(entry => entry.widget);
 }
 
-function ensureWidgetOrder(node) {
-    if (!node.widgets) return;
-
-    const promptEntries = node._promptEntries ?? [];
-    const addButton = node._addPromptButton
-        ?? node.widgets.find(w => w?._comfygAddPromptButton || w?.name === "add_prompt_btn");
-
-    const baseWidgets = node.widgets.filter(
-        w => !isPromptWidget(w) && !isPromptRemoveButton(w) && w !== addButton
-    );
-
-    node.widgets.length = 0;
-    node.widgets.push(...baseWidgets);
-    for (const entry of promptEntries) {
-        node.widgets.push(entry.widget);
-        if (entry.removeButton) node.widgets.push(entry.removeButton);
-    }
-    if (addButton) node.widgets.push(addButton);
-}
-
 function cleanupWidgetDom(widget) {
     const inputEl = widget?._comfygInputEl ?? widget?.inputEl ?? widget?.element;
     inputEl?.remove?.();
@@ -88,13 +68,33 @@ function cleanupWidgetDom(widget) {
 function hideWidget(widget) {
     widget.computeSize = () => [0, 0];
     widget.serializeValue = widget.serializeValue; // keep serialisation
+
+    const inputEl = widget?._comfygInputEl ?? widget?.inputEl ?? widget?.element;
+    if (inputEl?.style) {
+        inputEl.style.display = "none";
+        inputEl.style.visibility = "hidden";
+        inputEl.style.pointerEvents = "none";
+        inputEl.style.height = "0px";
+    }
+}
+
+function removeWidgetFromNode(node, widget) {
+    if (!node?.widgets || !widget) return;
+    const index = node.widgets.indexOf(widget);
+    if (index !== -1) node.widgets.splice(index, 1);
+}
+
+function removeAddPromptButton(node) {
+    if (!node?._addPromptButton) return;
+    removeWidgetFromNode(node, node._addPromptButton);
+    node._addPromptButton = null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Add / remove prompt widgets
 // ─────────────────────────────────────────────────────────────────────────────
 
-function addPromptWidget(node, value = "") {
+function appendPromptWidget(node, value = "") {
     if (!node._promptEntries) node._promptEntries = [];
 
     const idx = node._promptEntries.length;
@@ -110,6 +110,11 @@ function addPromptWidget(node, value = "") {
     w.value = value;
     w._comfygPromptWidget = true;
     w._comfygInputEl = created.inputEl ?? w.inputEl ?? w.element ?? null;
+    if (w._comfygInputEl?.style) {
+        w._comfygInputEl.style.overflowY = "auto";
+        w._comfygInputEl.style.resize = "vertical";
+        w._comfygInputEl.style.minHeight = "84px";
+    }
 
     // Do NOT serialize this widget independently — prompts_data carries all values.
     w.serialize = false;
@@ -132,10 +137,35 @@ function addPromptWidget(node, value = "") {
 
     node._promptEntries.push({ widget: w, removeButton });
     relabelPromptWidgets(node);
-    ensureWidgetOrder(node);
     syncDataWidget(node);
 
     return w;
+}
+
+function createAddPromptButton(node) {
+    if (node._addPromptButton && node.widgets?.includes(node._addPromptButton)) {
+        return node._addPromptButton;
+    }
+
+    const button = node.addWidget("button", "+ Add Prompt", null, () => {
+        addPromptWidget(node, "");
+    });
+
+    button._comfygAddPromptButton = true;
+    button.name = "+ Add Prompt";
+    button.label = "+ Add Prompt";
+    button.serialize = false;
+    node._addPromptButton = button;
+    return button;
+}
+
+function addPromptWidget(node, value = "") {
+    removeAddPromptButton(node);
+    const widget = appendPromptWidget(node, value);
+    createAddPromptButton(node);
+    node.setSize(node.computeSize());
+    app.graph.setDirtyCanvas(true, true);
+    return widget;
 }
 
 function removePromptWidget(node, index) {
@@ -149,10 +179,8 @@ function removePromptWidget(node, index) {
     // Remove from node.widgets
     cleanupWidgetDom(widget);
 
-    const wi = node.widgets.indexOf(widget);
-    if (wi !== -1) node.widgets.splice(wi, 1);
-    const bi = node.widgets.indexOf(removeButton);
-    if (bi !== -1) node.widgets.splice(bi, 1);
+    removeWidgetFromNode(node, widget);
+    removeWidgetFromNode(node, removeButton);
 
     // Remove from tracked list
     node._promptEntries.splice(index, 1);
@@ -160,7 +188,6 @@ function removePromptWidget(node, index) {
     // Re-label remaining widgets
     relabelPromptWidgets(node);
 
-    ensureWidgetOrder(node);
     syncDataWidget(node);
     node.setSize(node.computeSize());
     app.graph.setDirtyCanvas(true, true);
@@ -179,50 +206,26 @@ function rebuildFromData(node, promptsJson) {
     }
     if (!Array.isArray(prompts) || prompts.length === 0) prompts = [""];
 
+    removeAddPromptButton(node);
+
     // Remove every prompt widget we can find. This avoids stale widgets
     // when ComfyUI restores the node lifecycle in a different order.
     for (const w of (node.widgets ?? []).filter(
         widget => isPromptWidget(widget) || isPromptRemoveButton(widget)
     )) {
         if (isPromptWidget(w)) cleanupWidgetDom(w);
-        const i = node.widgets.indexOf(w);
-        if (i !== -1) node.widgets.splice(i, 1);
+        removeWidgetFromNode(node, w);
     }
     node._promptEntries = [];
     node._promptWidgets = [];
 
     // Recreate
-    for (const p of prompts) addPromptWidget(node, p);
+    for (const p of prompts) appendPromptWidget(node, p);
 
     relabelPromptWidgets(node);
-    ensureWidgetOrder(node);
+    createAddPromptButton(node);
     node.setSize(node.computeSize());
     app.graph.setDirtyCanvas(true, true);
-}
-
-function ensureAddPromptButton(node) {
-    if (node._addPromptButton && node.widgets?.includes(node._addPromptButton)) {
-        return node._addPromptButton;
-    }
-
-    let button = node.widgets?.find(
-        w => w?._comfygAddPromptButton || w?.name === "add_prompt_btn"
-    );
-    if (!button) {
-        button = node.addWidget("button", "+ Add Prompt", null, () => {
-            addPromptWidget(node, "");
-            node.setSize(node.computeSize());
-            app.graph.setDirtyCanvas(true, true);
-        });
-    }
-
-    button._comfygAddPromptButton = true;
-    button.name = "+ Add Prompt";
-    button.label = "+ Add Prompt";
-    button.serialize = false;
-    node._addPromptButton = button;
-    ensureWidgetOrder(node);
-    return button;
 }
 
 function prepareNode(node) {
@@ -236,8 +239,6 @@ function prepareNode(node) {
 
     const seedModeW = node.widgets?.find(w => w.name === "seed_mode");
     if (seedModeW) seedModeW.label = "Seed mode";
-
-    ensureAddPromptButton(node);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
