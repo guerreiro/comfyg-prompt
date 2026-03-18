@@ -1,249 +1,316 @@
 import { app } from "../../scripts/app.js";
-import { ComfyWidgets } from "../../scripts/widgets.js";
 
-const EXT_NAME   = "ComfygPrompt.DynamicPrompts";
-const NODE_NAME  = "ComfygPrompt";
-const DATA_WGT   = "prompts_data"; // hidden widget that stores the JSON
-const INDEX_WGT  = "_index";       // hidden counter widget
+const EXT_NAME = "ComfygPrompt.DynamicPrompts";
+const NODE_NAME = "ComfygPrompt";
+const DATA_WGT = "prompts_data";
+const INDEX_WGT = "_index";
 const CONTROL_WGT = "control_after_generate";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+const MIN_NODE_WIDTH = 380;
+const PROMPT_TEXTAREA_HEIGHT = 110;
+const PROMPT_CARD_HEIGHT = 170;
+const EDITOR_CHROME_HEIGHT = 78;
 
-/** Return current prompt values from the visual widgets. */
-function getPrompts(node) {
-    return (node._promptEntries ?? []).map(entry => entry.widget.value ?? "");
+function findWidget(node, name) {
+    return node.widgets?.find(widget => widget.name === name);
 }
 
-/** Write current prompt values into the hidden prompts_data widget. */
-function syncDataWidget(node) {
-    const dw = node.widgets?.find(w => w.name === DATA_WGT);
-    if (dw) dw.value = JSON.stringify(getPrompts(node));
-}
+function normalizePrompts(rawValue) {
+    let prompts = rawValue;
 
-function isPromptWidget(widget) {
-    return !!widget?._comfygPromptWidget;
-}
-
-function isPromptRemoveButton(widget) {
-    return !!widget?._comfygPromptRemoveButton;
-}
-
-function relabelPromptWidgets(node) {
-    const entries = node._promptEntries ?? [];
-
-    entries.forEach((entry, index) => {
-        const label = `Prompt ${index + 1}`;
-        const { widget, removeButton } = entry;
-
-        widget._comfygPromptWidget = true;
-        widget.name = label;
-        widget.label = label;
-
-        const inputEl = widget._comfygInputEl;
-        if (inputEl) {
-            inputEl.placeholder = label;
-            inputEl.setAttribute?.("placeholder", label);
+    if (typeof prompts === "string") {
+        try {
+            prompts = JSON.parse(prompts);
+        } catch {
+            prompts = [prompts];
         }
+    }
 
-        if (removeButton) {
-            removeButton.name = `Remove Prompt ${index + 1}`;
-            removeButton.label = removeButton.name;
-            removeButton.computeSize = () => (
-                entries.length > 1 ? [node.size[0] - 20, 28] : [0, 0]
-            );
-        }
+    if (!Array.isArray(prompts)) {
+        prompts = [prompts ?? ""];
+    }
+
+    prompts = prompts.map(prompt => {
+        if (typeof prompt === "string") return prompt;
+        return String(prompt ?? "");
     });
 
-    node._promptWidgets = entries.map(entry => entry.widget);
+    return prompts.length ? prompts : [""];
 }
 
-function cleanupWidgetDom(widget) {
-    const inputEl = widget?._comfygInputEl ?? widget?.inputEl ?? widget?.element;
-    inputEl?.remove?.();
+function getPromptState(node) {
+    if (!Array.isArray(node._comfygPromptState) || node._comfygPromptState.length === 0) {
+        node._comfygPromptState = [""];
+    }
+    return node._comfygPromptState;
 }
 
-/** Make a widget invisible while keeping it serialised. */
+function setPromptState(node, prompts, options = {}) {
+    const { sync = true, render = true, resize = true } = options;
+
+    node._comfygPromptState = normalizePrompts(prompts);
+
+    if (sync) syncDataWidget(node);
+    if (render) renderPromptEditor(node);
+    if (resize) resizeNodeForEditor(node);
+}
+
+function syncDataWidget(node) {
+    const dataWidget = findWidget(node, DATA_WGT);
+    if (dataWidget) {
+        dataWidget.value = JSON.stringify(getPromptState(node));
+    }
+}
+
 function hideWidget(widget) {
-    widget.computeSize = () => [0, 0];
-    widget.serializeValue = widget.serializeValue; // keep serialisation
+    if (!widget || widget._comfygHidden) return;
 
-    const inputEl = widget?._comfygInputEl ?? widget?.inputEl ?? widget?.element;
+    widget._comfygHidden = true;
+    widget.computeSize = () => [0, 0];
+    widget.draw = () => {};
+
+    const inputEl = widget.inputEl ?? widget.element ?? null;
     if (inputEl?.style) {
         inputEl.style.display = "none";
         inputEl.style.visibility = "hidden";
         inputEl.style.pointerEvents = "none";
         inputEl.style.height = "0px";
+        inputEl.style.minHeight = "0px";
+        inputEl.style.maxHeight = "0px";
+        inputEl.style.opacity = "0";
     }
 }
 
-function removeWidgetFromNode(node, widget) {
-    if (!node?.widgets || !widget) return;
-    const index = node.widgets.indexOf(widget);
-    if (index !== -1) node.widgets.splice(index, 1);
+function getEditorHeight(node) {
+    return EDITOR_CHROME_HEIGHT + (getPromptState(node).length * PROMPT_CARD_HEIGHT);
 }
 
-function removeAddPromptButton(node) {
-    if (!node?._addPromptButton) return;
-    removeWidgetFromNode(node, node._addPromptButton);
-    node._addPromptButton = null;
+function getNodeMinHeight(node) {
+    const baseHeight = node.computeSize ? node.computeSize()[1] : 0;
+    return Math.max(baseHeight, getEditorHeight(node) + 140);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Add / remove prompt widgets
-// ─────────────────────────────────────────────────────────────────────────────
+function resizeNodeForEditor(node) {
+    const nextWidth = Math.max(node.size?.[0] ?? MIN_NODE_WIDTH, MIN_NODE_WIDTH);
+    const nextHeight = Math.max(node.size?.[1] ?? 0, getNodeMinHeight(node));
 
-function appendPromptWidget(node, value = "") {
-    if (!node._promptEntries) node._promptEntries = [];
-
-    const idx = node._promptEntries.length;
-
-    // Create a native STRING widget (multiline text area).
-    const created = ComfyWidgets["STRING"](
-        node,
-        `Prompt ${idx + 1}`,
-        ["STRING", { multiline: true, default: value }],
-        app
-    );
-    const w = created.widget;
-    w.value = value;
-    w._comfygPromptWidget = true;
-    w._comfygInputEl = created.inputEl ?? w.inputEl ?? w.element ?? null;
-    if (w._comfygInputEl?.style) {
-        w._comfygInputEl.style.overflowY = "auto";
-        w._comfygInputEl.style.resize = "vertical";
-        w._comfygInputEl.style.minHeight = "84px";
+    if (!node.size || node.size[0] !== nextWidth || node.size[1] !== nextHeight) {
+        node.setSize([nextWidth, nextHeight]);
     }
 
-    // Do NOT serialize this widget independently — prompts_data carries all values.
-    w.serialize = false;
-
-    // Intercept value changes so prompts_data stays in sync.
-    const origCb = w.callback;
-    w.callback = function (val) {
-        origCb?.call(this, val);
-        syncDataWidget(node);
-    };
-
-    const removeButton = node.addWidget("button", `Remove Prompt ${idx + 1}`, null, () => {
-        const currentIndex = (node._promptEntries ?? []).findIndex(
-            entry => entry.widget === w
-        );
-        removePromptWidget(node, currentIndex);
-    });
-    removeButton._comfygPromptRemoveButton = true;
-    removeButton.serialize = false;
-
-    node._promptEntries.push({ widget: w, removeButton });
-    relabelPromptWidgets(node);
-    syncDataWidget(node);
-
-    return w;
-}
-
-function createAddPromptButton(node) {
-    if (node._addPromptButton && node.widgets?.includes(node._addPromptButton)) {
-        return node._addPromptButton;
-    }
-
-    const button = node.addWidget("button", "+ Add Prompt", null, () => {
-        addPromptWidget(node, "");
-    });
-
-    button._comfygAddPromptButton = true;
-    button.name = "+ Add Prompt";
-    button.label = "+ Add Prompt";
-    button.serialize = false;
-    node._addPromptButton = button;
-    return button;
-}
-
-function addPromptWidget(node, value = "") {
-    removeAddPromptButton(node);
-    const widget = appendPromptWidget(node, value);
-    createAddPromptButton(node);
-    node.setSize(node.computeSize());
     app.graph.setDirtyCanvas(true, true);
+}
+
+function stopEventBubble(element) {
+    const stop = event => event.stopPropagation();
+    ["pointerdown", "mousedown", "click", "dblclick", "wheel"].forEach(eventName => {
+        element.addEventListener(eventName, stop);
+    });
+}
+
+function createElement(tag, style = {}) {
+    const element = document.createElement(tag);
+    Object.assign(element.style, style);
+    return element;
+}
+
+function buildEditorDom(node) {
+    const root = createElement("div", {
+        display: "flex",
+        flexDirection: "column",
+        gap: "12px",
+        boxSizing: "border-box",
+        width: "100%",
+        color: "#ddd",
+        padding: "4px 0 2px 0",
+        fontFamily: "system-ui, sans-serif",
+    });
+
+    const title = createElement("div", {
+        fontSize: "12px",
+        fontWeight: "600",
+        letterSpacing: "0.03em",
+        textTransform: "uppercase",
+        color: "#a8a8a8",
+        padding: "2px 2px 0 2px",
+    });
+    title.textContent = "Prompts";
+
+    const list = createElement("div", {
+        display: "flex",
+        flexDirection: "column",
+        gap: "12px",
+    });
+
+    const addButton = createElement("button", {
+        appearance: "none",
+        border: "1px solid #666",
+        borderRadius: "8px",
+        background: "#2d2d2d",
+        color: "#f2f2f2",
+        cursor: "pointer",
+        fontSize: "14px",
+        lineHeight: "20px",
+        height: "38px",
+        width: "100%",
+    });
+    addButton.type = "button";
+    addButton.textContent = "+ Add Prompt";
+    stopEventBubble(addButton);
+    addButton.addEventListener("click", () => {
+        setPromptState(node, [...getPromptState(node), ""]);
+    });
+
+    root.append(title, list, addButton);
+    stopEventBubble(root);
+
+    node._comfygEditorEls = { root, list, addButton };
+    return root;
+}
+
+function renderPromptEditor(node) {
+    const list = node._comfygEditorEls?.list;
+    if (!list) return;
+
+    list.replaceChildren();
+
+    const prompts = getPromptState(node);
+
+    prompts.forEach((promptValue, index) => {
+        const card = createElement("div", {
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+            border: "1px solid #4f4f4f",
+            borderRadius: "10px",
+            padding: "10px",
+            background: "#232323",
+            boxSizing: "border-box",
+        });
+
+        const header = createElement("div", {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "12px",
+        });
+
+        const title = createElement("div", {
+            fontSize: "13px",
+            fontWeight: "600",
+            color: "#e8e8e8",
+        });
+        title.textContent = `Prompt ${index + 1}`;
+
+        const removeButton = createElement("button", {
+            appearance: "none",
+            border: "1px solid #7a4b4b",
+            borderRadius: "6px",
+            background: prompts.length > 1 ? "#5b2d2d" : "#353535",
+            color: prompts.length > 1 ? "#fff" : "#8d8d8d",
+            cursor: prompts.length > 1 ? "pointer" : "default",
+            fontSize: "12px",
+            lineHeight: "18px",
+            minWidth: "84px",
+            height: "28px",
+        });
+        removeButton.type = "button";
+        removeButton.textContent = "Remove";
+        removeButton.disabled = prompts.length <= 1;
+        stopEventBubble(removeButton);
+        removeButton.addEventListener("click", () => {
+            if (prompts.length <= 1) return;
+            const nextPrompts = getPromptState(node).filter((_, promptIndex) => promptIndex !== index);
+            setPromptState(node, nextPrompts);
+        });
+
+        const textarea = createElement("textarea", {
+            width: "100%",
+            minWidth: "0",
+            minHeight: `${PROMPT_TEXTAREA_HEIGHT}px`,
+            height: `${PROMPT_TEXTAREA_HEIGHT}px`,
+            maxHeight: `${PROMPT_TEXTAREA_HEIGHT}px`,
+            boxSizing: "border-box",
+            resize: "none",
+            overflowY: "auto",
+            border: "1px solid #5d5d5d",
+            borderRadius: "8px",
+            background: "#171717",
+            color: "#f3f3f3",
+            padding: "10px",
+            fontSize: "13px",
+            lineHeight: "1.4",
+            outline: "none",
+        });
+        textarea.value = promptValue;
+        textarea.placeholder = `Prompt ${index + 1}`;
+        textarea.spellcheck = false;
+        stopEventBubble(textarea);
+        textarea.addEventListener("input", event => {
+            const nextPrompts = [...getPromptState(node)];
+            nextPrompts[index] = event.target.value;
+            setPromptState(node, nextPrompts, { render: false, resize: false });
+        });
+
+        header.append(title, removeButton);
+        card.append(header, textarea);
+        list.append(card);
+    });
+
+    const addButton = node._comfygEditorEls?.addButton;
+    if (addButton) {
+        addButton.disabled = false;
+    }
+
+    app.graph.setDirtyCanvas(true, true);
+}
+
+function ensureEditorWidget(node) {
+    if (node._comfygEditorWidget) return node._comfygEditorWidget;
+    if (typeof node.addDOMWidget !== "function") {
+        console.warn("[Comfyg-Prompt] addDOMWidget is not available in this frontend.");
+        return null;
+    }
+
+    const root = buildEditorDom(node);
+
+    const widget = node.addDOMWidget("prompts_editor", "COMFYG_PROMPTS_EDITOR", root, {
+        hideOnZoom: false,
+        getValue: () => JSON.stringify(getPromptState(node)),
+        setValue: value => {
+            setPromptState(node, normalizePrompts(value));
+        },
+        getMinHeight: () => getEditorHeight(node),
+        getMaxHeight: () => getEditorHeight(node),
+        getHeight: () => getEditorHeight(node),
+        afterResize: () => {
+            resizeNodeForEditor(node);
+        },
+    });
+
+    widget.serialize = false;
+    widget.computeSize = () => [Math.max((node.size?.[0] ?? MIN_NODE_WIDTH) - 20, 0), getEditorHeight(node)];
+    node._comfygEditorWidget = widget;
+
     return widget;
 }
 
-function removePromptWidget(node, index) {
-    if (!node._promptEntries || node._promptEntries.length <= 1) return;
-
-    const entry = node._promptEntries[index];
-    if (!entry) return;
-
-    const { widget, removeButton } = entry;
-
-    // Remove from node.widgets
-    cleanupWidgetDom(widget);
-
-    removeWidgetFromNode(node, widget);
-    removeWidgetFromNode(node, removeButton);
-
-    // Remove from tracked list
-    node._promptEntries.splice(index, 1);
-
-    // Re-label remaining widgets
-    relabelPromptWidgets(node);
-
-    syncDataWidget(node);
-    node.setSize(node.computeSize());
-    app.graph.setDirtyCanvas(true, true);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Rebuild visual widgets from a saved JSON array (used on load / configure)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function rebuildFromData(node, promptsJson) {
-    let prompts;
-    try {
-        prompts = JSON.parse(promptsJson);
-    } catch {
-        prompts = [""];
-    }
-    if (!Array.isArray(prompts) || prompts.length === 0) prompts = [""];
-
-    removeAddPromptButton(node);
-
-    // Remove every prompt widget we can find. This avoids stale widgets
-    // when ComfyUI restores the node lifecycle in a different order.
-    for (const w of (node.widgets ?? []).filter(
-        widget => isPromptWidget(widget) || isPromptRemoveButton(widget)
-    )) {
-        if (isPromptWidget(w)) cleanupWidgetDom(w);
-        removeWidgetFromNode(node, w);
-    }
-    node._promptEntries = [];
-    node._promptWidgets = [];
-
-    // Recreate
-    for (const p of prompts) appendPromptWidget(node, p);
-
-    relabelPromptWidgets(node);
-    createAddPromptButton(node);
-    node.setSize(node.computeSize());
-    app.graph.setDirtyCanvas(true, true);
-}
-
 function prepareNode(node) {
-    const dataW = node.widgets?.find(w => w.name === DATA_WGT);
-    const indexW = node.widgets?.find(w => w.name === INDEX_WGT);
-    const controlW = node.widgets?.find(w => w.name === CONTROL_WGT);
+    hideWidget(findWidget(node, DATA_WGT));
+    hideWidget(findWidget(node, INDEX_WGT));
+    hideWidget(findWidget(node, CONTROL_WGT));
 
-    if (dataW) hideWidget(dataW);
-    if (indexW) hideWidget(indexW);
-    if (controlW) hideWidget(controlW);
+    const seedModeWidget = findWidget(node, "seed_mode");
+    if (seedModeWidget) seedModeWidget.label = "Seed mode";
 
-    const seedModeW = node.widgets?.find(w => w.name === "seed_mode");
-    if (seedModeW) seedModeW.label = "Seed mode";
+    ensureEditorWidget(node);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Extension registration
-// ─────────────────────────────────────────────────────────────────────────────
+function syncFromSerializedData(node) {
+    const dataWidget = findWidget(node, DATA_WGT);
+    const prompts = normalizePrompts(dataWidget?.value ?? '[""]');
+    setPromptState(node, prompts);
+}
 
 app.registerExtension({
     name: EXT_NAME,
@@ -251,36 +318,51 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_NAME) return;
 
-        // ── onNodeCreated ──────────────────────────────────────────────
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
             prepareNode(this);
-
-            const dataW = this.widgets?.find(w => w.name === DATA_WGT);
-            rebuildFromData(this, dataW?.value || '[""]');
+            syncFromSerializedData(this);
         };
 
-        // ── onConfigure — restore widgets when loading a saved workflow ──
         const origConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (data) {
             origConfigure?.apply(this, arguments);
             prepareNode(this);
-
-            const dataW = this.widgets?.find(w => w.name === DATA_WGT);
-            rebuildFromData(this, dataW?.value || '[""]');
+            syncFromSerializedData(this);
         };
 
-        // ── getExtraMenuOptions — right-click context menu ───────────────
+        const origResize = nodeType.prototype.onResize;
+        nodeType.prototype.onResize = function (size) {
+            origResize?.apply(this, arguments);
+
+            if (Array.isArray(size) && size.length >= 2) {
+                const nextWidth = Math.max(size[0], MIN_NODE_WIDTH);
+                const nextHeight = Math.max(size[1], getNodeMinHeight(this));
+                if (nextWidth !== size[0] || nextHeight !== size[1]) {
+                    this.setSize([nextWidth, nextHeight]);
+                }
+            }
+        };
+
+        const origRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            this._comfygEditorEls?.root?.remove?.();
+            this._comfygEditorEls = null;
+            this._comfygEditorWidget = null;
+            this._comfygPromptState = null;
+            origRemoved?.apply(this, arguments);
+        };
+
         const origMenu = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function (_, options) {
             origMenu?.apply(this, arguments);
             options.push({
                 content: "Reset Comfyg-Prompt (clear all prompts)",
                 callback: () => {
-                    rebuildFromData(this, '[""]');
-                    const indexW = this.widgets?.find(w => w.name === INDEX_WGT);
-                    if (indexW) indexW.value = 0;
+                    const indexWidget = findWidget(this, INDEX_WGT);
+                    if (indexWidget) indexWidget.value = 0;
+                    setPromptState(this, [""]);
                 },
             });
         };
