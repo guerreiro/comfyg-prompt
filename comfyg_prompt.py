@@ -85,13 +85,19 @@ class ComfygPrompt:
 
         # --- queue next job if there is one --------------------------------
         if index + 1 < total:
-            self._queue_next(prompt, extra_pnginfo, unique_id, index + 1)
+            self._queue_next(
+                prompt,
+                extra_pnginfo,
+                unique_id,
+                index + 1,
+                seed,
+            )
 
         return (current_prompt, current_seed)
 
     # ------------------------------------------------------------------ #
 
-    def _queue_next(self, api_prompt, extra_pnginfo, unique_id, next_index):
+    def _queue_next(self, api_prompt, extra_pnginfo, unique_id, next_index, base_seed):
         """
         Build a copy of the current prompt/workflow with _index incremented
         and POST it to the local ComfyUI /prompt endpoint.
@@ -106,6 +112,7 @@ class ComfygPrompt:
         if node_id in new_prompt:
             inputs = new_prompt[node_id].setdefault("inputs", {})
             inputs["_index"] = next_index
+            inputs["seed"] = base_seed
             inputs["control_after_generate"] = "fixed"
 
         # Also update the workflow JSON that gets embedded in the PNG metadata
@@ -123,6 +130,8 @@ class ComfygPrompt:
                         wv[-1] = next_index
                     if len(wv) >= 2 and isinstance(wv[-2], str):
                         wv[-2] = "fixed"
+                    if len(wv) >= 3:
+                        wv[-3] = base_seed
                     break
 
         payload = {

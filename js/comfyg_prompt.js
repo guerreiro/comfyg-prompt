@@ -308,9 +308,15 @@ function ensureEditorWidget(node) {
 }
 
 function prepareNode(node) {
-    hideWidget(findWidget(node, DATA_WGT));
-    hideWidget(findWidget(node, INDEX_WGT));
-    hideWidget(findWidget(node, CONTROL_WGT));
+    const dataWidget = findWidget(node, DATA_WGT);
+    const indexWidget = findWidget(node, INDEX_WGT);
+    const controlWidget = findWidget(node, CONTROL_WGT);
+
+    if (controlWidget) controlWidget.value = "fixed";
+
+    hideWidget(dataWidget);
+    hideWidget(indexWidget);
+    hideWidget(controlWidget);
 
     const seedModeWidget = findWidget(node, "seed_mode");
     if (seedModeWidget) seedModeWidget.label = "Seed mode";
