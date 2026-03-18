@@ -12,7 +12,8 @@ class ComfygPrompt:
         [1] repetitions   — how many times each prompt is run
         [2] seed_mode     — "incremental" | "fixed"
         [3] seed          — base seed value
-        [4] _index        — current job index (written by the node itself when queueing)
+        [4] control_after_generate — auto-added by ComfyUI for the seed widget
+        [5] _index                — current job index (written by the node itself when queueing)
 
     _index and prompts_data are hidden in the UI via the JS extension.
     """
@@ -99,9 +100,13 @@ class ComfygPrompt:
         node_id = str(unique_id)
 
         # Update _index inside the API-format prompt (used by ComfyUI to
-        # resolve node inputs during execution).
+        # resolve node inputs during execution). We also force
+        # control_after_generate to fixed so ComfyUI does not mutate the
+        # seed behind our own seed_mode logic.
         if node_id in new_prompt:
-            new_prompt[node_id]["inputs"]["_index"] = next_index
+            inputs = new_prompt[node_id].setdefault("inputs", {})
+            inputs["_index"] = next_index
+            inputs["control_after_generate"] = "fixed"
 
         # Also update the workflow JSON that gets embedded in the PNG metadata
         # and is used by the frontend to restore the graph state.
@@ -111,10 +116,13 @@ class ComfygPrompt:
             for node in workflow.get("nodes", []):
                 if str(node.get("id")) == node_id:
                     wv = node.get("widgets_values", [])
-                    # widgets_values order mirrors INPUT_TYPES order:
-                    # [0]=prompts_data [1]=repetitions [2]=seed_mode [3]=seed [4]=_index
-                    if len(wv) >= 5:
-                        wv[4] = next_index
+                    # widgets_values also includes ComfyUI's linked
+                    # control_after_generate widget for seed, so _index is
+                    # the last entry rather than a fixed index.
+                    if len(wv) >= 1:
+                        wv[-1] = next_index
+                    if len(wv) >= 2 and isinstance(wv[-2], str):
+                        wv[-2] = "fixed"
                     break
 
         payload = {

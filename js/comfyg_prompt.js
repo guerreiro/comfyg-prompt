@@ -168,6 +168,18 @@ function buildEditorDom(node) {
     return root;
 }
 
+function destroyEditorWidget(node) {
+    const widget = node._comfygEditorWidget;
+    if (widget && node.widgets) {
+        const widgetIndex = node.widgets.indexOf(widget);
+        if (widgetIndex !== -1) node.widgets.splice(widgetIndex, 1);
+    }
+
+    node._comfygEditorEls?.root?.remove?.();
+    node._comfygEditorEls = null;
+    node._comfygEditorWidget = null;
+}
+
 function renderPromptEditor(node) {
     const list = node._comfygEditorEls?.list;
     if (!list) return;
@@ -328,6 +340,7 @@ app.registerExtension({
         const origConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (data) {
             origConfigure?.apply(this, arguments);
+            destroyEditorWidget(this);
             prepareNode(this);
             syncFromSerializedData(this);
         };
@@ -347,9 +360,7 @@ app.registerExtension({
 
         const origRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
-            this._comfygEditorEls?.root?.remove?.();
-            this._comfygEditorEls = null;
-            this._comfygEditorWidget = null;
+            destroyEditorWidget(this);
             this._comfygPromptState = null;
             origRemoved?.apply(this, arguments);
         };
