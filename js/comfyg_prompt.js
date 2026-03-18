@@ -5,6 +5,7 @@ const EXT_NAME   = "ComfygPrompt.DynamicPrompts";
 const NODE_NAME  = "ComfygPrompt";
 const DATA_WGT   = "prompts_data"; // hidden widget that stores the JSON
 const INDEX_WGT  = "_index";       // hidden counter widget
+const CONTROL_WGT = "control_after_generate";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -21,6 +22,35 @@ function syncDataWidget(node) {
     if (dw) dw.value = JSON.stringify(getPrompts(node));
 }
 
+function isPromptWidget(widget) {
+    return !!(widget?._comfygPromptWidget || widget?.name?.startsWith("_vp_"));
+}
+
+function relabelPromptWidgets(node) {
+    (node._promptWidgets ?? []).forEach((widget, index) => {
+        const label = `Prompt ${index + 1}`;
+        widget._comfygPromptWidget = true;
+        widget.name = `_vp_${index}`;
+        widget.label = label;
+    });
+}
+
+function ensureWidgetOrder(node) {
+    if (!node.widgets) return;
+
+    const promptWidgets = node.widgets.filter(isPromptWidget);
+    const addButton = node._addPromptButton
+        ?? node.widgets.find(w => w?._comfygAddPromptButton);
+
+    const baseWidgets = node.widgets.filter(
+        w => !isPromptWidget(w) && w !== addButton
+    );
+
+    node.widgets.length = 0;
+    node.widgets.push(...baseWidgets, ...promptWidgets);
+    if (addButton) node.widgets.push(addButton);
+}
+
 /** Make a widget invisible while keeping it serialised. */
 function hideWidget(widget) {
     widget.computeSize = () => [0, -4];
@@ -35,7 +65,6 @@ function addPromptWidget(node, value = "") {
     if (!node._promptWidgets) node._promptWidgets = [];
 
     const idx = node._promptWidgets.length;
-    const label = `Prompt ${idx + 1}`;
 
     // Create a native STRING widget (multiline text area).
     const created = ComfyWidgets["STRING"](
@@ -103,6 +132,8 @@ function addPromptWidget(node, value = "") {
     };
 
     node._promptWidgets.push(w);
+    relabelPromptWidgets(node);
+    ensureWidgetOrder(node);
     syncDataWidget(node);
 
     return w;
@@ -122,10 +153,9 @@ function removePromptWidget(node, index) {
     node._promptWidgets.splice(index, 1);
 
     // Re-label remaining widgets
-    node._promptWidgets.forEach((pw, i) => {
-        pw.name  = `_vp_${i}`;
-    });
+    relabelPromptWidgets(node);
 
+    ensureWidgetOrder(node);
     syncDataWidget(node);
     node.setSize(node.computeSize());
     app.graph.setDirtyCanvas(true, true);
@@ -144,8 +174,9 @@ function rebuildFromData(node, promptsJson) {
     }
     if (!Array.isArray(prompts) || prompts.length === 0) prompts = [""];
 
-    // Remove existing visual widgets
-    for (const w of (node._promptWidgets ?? [])) {
+    // Remove every prompt widget we can find. This avoids stale widgets
+    // when ComfyUI restores the node lifecycle in a different order.
+    for (const w of (node.widgets ?? []).filter(isPromptWidget)) {
         const i = node.widgets.indexOf(w);
         if (i !== -1) node.widgets.splice(i, 1);
     }
@@ -154,8 +185,45 @@ function rebuildFromData(node, promptsJson) {
     // Recreate
     for (const p of prompts) addPromptWidget(node, p);
 
+    relabelPromptWidgets(node);
+    ensureWidgetOrder(node);
     node.setSize(node.computeSize());
     app.graph.setDirtyCanvas(true, true);
+}
+
+function ensureAddPromptButton(node) {
+    if (node._addPromptButton && node.widgets?.includes(node._addPromptButton)) {
+        return node._addPromptButton;
+    }
+
+    let button = node.widgets?.find(w => w?._comfygAddPromptButton);
+    if (!button) {
+        button = node.addWidget("button", "+ Add Prompt", null, () => {
+            addPromptWidget(node, "");
+            node.setSize(node.computeSize());
+            app.graph.setDirtyCanvas(true, true);
+        });
+        button._comfygAddPromptButton = true;
+    }
+
+    node._addPromptButton = button;
+    ensureWidgetOrder(node);
+    return button;
+}
+
+function prepareNode(node) {
+    const dataW = node.widgets?.find(w => w.name === DATA_WGT);
+    const indexW = node.widgets?.find(w => w.name === INDEX_WGT);
+    const controlW = node.widgets?.find(w => w.name === CONTROL_WGT);
+
+    if (dataW) hideWidget(dataW);
+    if (indexW) hideWidget(indexW);
+    if (controlW) hideWidget(controlW);
+
+    const seedModeW = node.widgets?.find(w => w.name === "seed_mode");
+    if (seedModeW) seedModeW.label = "Seed mode";
+
+    ensureAddPromptButton(node);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,38 +240,20 @@ app.registerExtension({
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origCreated?.apply(this, arguments);
+            prepareNode(this);
 
-            // Hide internal widgets.
-            const dataW  = this.widgets?.find(w => w.name === DATA_WGT);
-            const indexW = this.widgets?.find(w => w.name === INDEX_WGT);
-            if (dataW)  hideWidget(dataW);
-            if (indexW) hideWidget(indexW);
-
-            // Seed mode label tweak (cosmetic).
-            const seedModeW = this.widgets?.find(w => w.name === "seed_mode");
-            if (seedModeW) seedModeW.label = "Seed mode";
-
-            // Add first visual prompt widget.
-            this._promptWidgets = [];
-            addPromptWidget(this, "");
-
-            // ── "Add Prompt" button ─────────────────────────────────────
-            this.addWidget("button", "add_prompt_btn", "+ Add Prompt", () => {
-                addPromptWidget(this, "");
-                this.setSize(this.computeSize());
-                app.graph.setDirtyCanvas(true, true);
-            });
+            const dataW = this.widgets?.find(w => w.name === DATA_WGT);
+            rebuildFromData(this, dataW?.value || '[""]');
         };
 
         // ── onConfigure — restore widgets when loading a saved workflow ──
         const origConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (data) {
             origConfigure?.apply(this, arguments);
+            prepareNode(this);
 
             const dataW = this.widgets?.find(w => w.name === DATA_WGT);
-            if (dataW?.value) {
-                rebuildFromData(this, dataW.value);
-            }
+            rebuildFromData(this, dataW?.value || '[""]');
         };
 
         // ── getExtraMenuOptions — right-click context menu ───────────────
