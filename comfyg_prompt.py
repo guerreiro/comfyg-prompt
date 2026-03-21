@@ -1,4 +1,5 @@
 import copy
+import random
 import requests
 
 
@@ -21,8 +22,8 @@ class ComfygPrompt:
                 }),
                 "repetitions": ("INT", {"default": 1, "min": 1, "max": 50}),
                 "_index": ("INT", {"default": 0, "min": 0, "max": 9999}),
-                "seed_mode": (["incremental", "fixed"],),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": False}),
+                "seed_mode": (["fixed", "increment", "decrement", "random"],),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -36,13 +37,24 @@ class ComfygPrompt:
     FUNCTION = "execute"
     CATEGORY = "utils"
 
+    def calculate_seed(self, base_seed, index, seed_mode):
+        if seed_mode == "fixed":
+            return base_seed
+        elif seed_mode == "increment":
+            return base_seed + index
+        elif seed_mode == "decrement":
+            return base_seed - index
+        elif seed_mode == "random":
+            return random.randint(0, 0xFFFFFFFFFFFFFFFF)
+        return base_seed
+
     def execute(
         self,
         prompts,
         repetitions,
         _index,
-        seed_mode,
         seed,
+        seed_mode,
         unique_id,
         extra_pnginfo,
         prompt,
@@ -50,7 +62,7 @@ class ComfygPrompt:
         lines = [line.strip() for line in prompts.split('\n') if line.strip()]
         
         if not lines:
-            print("[Comfyg-Prompt] No prompts found — returning empty string.")
+            print("[Comfyg-Prompt] No prompts found.")
             return ("", seed)
 
         job_list = [p for p in lines for _ in range(repetitions)]
@@ -58,12 +70,12 @@ class ComfygPrompt:
         
         index = min(_index, total - 1)
         current_prompt = job_list[index]
-        current_seed = (seed + index) if seed_mode == "incremental" else seed
+        current_seed = self.calculate_seed(seed, index, seed_mode)
 
         print(
             f"[Comfyg-Prompt] Job {index + 1}/{total} "
             f"| seed_mode={seed_mode} seed={current_seed} "
-            f"| prompt={current_prompt[:80]!r}"
+            f"| prompt={current_prompt[:60]!r}..."
         )
 
         if index + 1 < total:
@@ -73,19 +85,21 @@ class ComfygPrompt:
                 unique_id,
                 index + 1,
                 seed,
+                seed_mode,
             )
 
         return (current_prompt, current_seed)
 
-    def _queue_next(self, api_prompt, extra_pnginfo, unique_id, next_index, base_seed):
+    def _queue_next(self, api_prompt, extra_pnginfo, unique_id, next_index, base_seed, seed_mode):
         new_prompt = copy.deepcopy(api_prompt)
         node_id = str(unique_id)
+
+        next_seed = self.calculate_seed(base_seed, next_index, seed_mode)
 
         if node_id in new_prompt:
             inputs = new_prompt[node_id].setdefault("inputs", {})
             inputs["_index"] = next_index
-            inputs["seed"] = base_seed
-            inputs["control_after_generate"] = "fixed"
+            inputs["seed"] = next_seed
 
         workflow = {}
         if extra_pnginfo and "workflow" in extra_pnginfo:
@@ -96,7 +110,7 @@ class ComfygPrompt:
                     if len(wv) >= 1:
                         wv[-1] = next_index
                     if len(wv) >= 2:
-                        wv[-2] = base_seed
+                        wv[-2] = next_seed
                     break
 
         payload = {
