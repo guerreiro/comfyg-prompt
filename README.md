@@ -25,7 +25,7 @@ Comfyg-Prompt allows you to:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/your-username/comfyg-prompt.git
+git clone https://github.com/guerreiro/comfyg-prompt
 pip install requests
 ```
 
@@ -56,14 +56,6 @@ The node will:
 |--------|------|-------------|
 | `prompt` | STRING | The current prompt text |
 | `seed` | INT | The calculated seed value |
-
-## Features
-
-- ✅ Dynamic prompt fields (add/remove)
-- ✅ Multiple seed modes
-- ✅ Automatic job queuing
-- ✅ Clean UI with horizontal layout
-- ✅ Workflow persistence
 
 ## Requirements
 
