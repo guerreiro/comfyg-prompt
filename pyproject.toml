@@ -1,0 +1,15 @@
+[project]
+name = "comfyg-prompt"
+description = "A ComfyUI custom node that queues one job per prompt. Dynamically add or remove prompt fields as needed."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = ["requests"]
+
+[project.urls]
+Repository = "https://github.com/guerreiro/comfyg-prompt"
+#  Used by Comfy Registry https://registry.comfy.org
+
+[tool.comfy]
+PublisherId = "guerreiro"
+DisplayName = "comfyg-prompt"
+Icon = ""
